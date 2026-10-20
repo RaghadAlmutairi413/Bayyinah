@@ -74,7 +74,7 @@ class User(AbstractBaseUser):
     REQUIRED_FIELDS = ['org']
 
     class Meta:
-        db_table = 'user'
+        db_table = 'bayyinah_user'
 
     @property
     def role(self):
