@@ -50,7 +50,7 @@ class SchemaTests(SimpleTestCase):
     def test_models_match_the_supplied_business_tables(self):
         expected = {
             'organization',
-            'user',
+            'bayyinah_user',
             'employee',
             'manager',
             'project',
