@@ -19,7 +19,6 @@ class UserManager(BaseUserManager):
         email,
         password=None,
         org=None,
-        full_name=None,
         first_name=None,
         last_name=None,
         department=None,
@@ -29,11 +28,18 @@ class UserManager(BaseUserManager):
     ):
         if not email:
             raise ValueError('Users must have an email address.')
+        if not first_name or not first_name.strip():
+            raise ValueError('Users must have a first name.')
+        if not last_name or not last_name.strip():
+            raise ValueError('Users must have a last name.')
+        first_name = first_name.strip()
+        last_name = last_name.strip()
+        if len(first_name) > 255 or len(last_name) > 255:
+            raise ValueError('Names must be 255 characters or fewer.')
 
         user = self.model(
             email=self.normalize_email(email),
             org=org,
-            full_name=full_name,
             first_name=first_name,
             last_name=last_name,
             department=department,
@@ -54,7 +60,6 @@ class User(AbstractBaseUser):
     password = models.CharField(max_length=255, db_column='password_hash')
     last_login = None
     email = models.EmailField(max_length=255, unique=True)
-    full_name = models.CharField(max_length=255, blank=True, null=True)
     first_name = models.CharField(max_length=255, blank=True, null=True)
     last_name = models.CharField(max_length=255, blank=True, null=True)
     gender = models.CharField(max_length=50, blank=True, null=True)
@@ -78,8 +83,10 @@ class User(AbstractBaseUser):
 
     @property
     def role(self):
+        if hasattr(self, 'manager_record'):
+            return 'Manager'
         try:
-            return self.employee_record.system_role
+            return self.employee_record.system_role   # 'Employee' or 'HR'
         except Employee.DoesNotExist:
             return 'HR'
 
@@ -97,13 +104,11 @@ class User(AbstractBaseUser):
         return self.role == 'HR'
 
     @property
-    def full_display_name(self):
-        if self.full_name:
-            return self.full_name
+    def display_name(self):
         return f'{self.first_name or ""} {self.last_name or ""}'.strip()
 
     def get_full_name(self):
-        return self.full_display_name
+        return self.display_name
 
     def get_short_name(self):
         return self.first_name or self.email
@@ -122,12 +127,15 @@ class Employee(models.Model):
     )
     system_role = models.CharField(max_length=100, blank=True, null=True)
     hire_date = models.DateField(blank=True, null=True)
-    service_years = models.DecimalField(
-        max_digits=4,
-        decimal_places=2,
-        blank=True,
-        null=True,
-    )
+
+    manager = models.ForeignKey(
+    'Manager',
+    on_delete=models.SET_NULL,
+    db_column='manager_id',
+    related_name='managed_employees',
+    blank=True,
+    null=True,
+)
 
     class Meta:
         db_table = 'employee'
@@ -177,11 +185,14 @@ class Task(models.Model):
     )
     created_at = models.DateTimeField(blank=True, null=True)
     privacy = models.CharField(max_length=50, blank=True, null=True)
+    status = models.CharField(max_length=50, default='todo')
     project = models.ForeignKey(
         Project,
         on_delete=models.PROTECT,
         db_column='project_id',
         related_name='tasks',
+        null=True,
+        blank=True
     )
     employee = models.ForeignKey(
         Employee,
@@ -320,9 +331,8 @@ class Goal(models.Model):
         blank=True,
         null=True,
     )
-    target_outcome = models.TextField(blank=True, null=True)
+    # Period code of the goal: annual, Q1-Q4 or M1-M12 (the dates are in period_start/period_end).
     time_period = models.CharField(max_length=100, blank=True, null=True)
-    actual_outcome = models.TextField(blank=True, null=True)
     rating = models.DecimalField(
         max_digits=3,
         decimal_places=2,
@@ -334,6 +344,25 @@ class Goal(models.Model):
         on_delete=models.PROTECT,
         db_column='manager_id',
         related_name='goals',
+    )
+    # --- KPI fields (goals feature) ---
+    # target_value / actual_value are numbers so progress and rating can be calculated.
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        db_column='employee_id',
+        related_name='goals',
+        blank=True,
+        null=True,
+    )
+    evaluation_year = models.PositiveSmallIntegerField(blank=True, null=True)
+    period_start = models.DateField(blank=True, null=True)
+    period_end = models.DateField(blank=True, null=True)
+    target_value = models.DecimalField(
+        max_digits=10, decimal_places=2, blank=True, null=True,
+    )
+    actual_value = models.DecimalField(
+        max_digits=10, decimal_places=2, blank=True, null=True,
     )
 
     class Meta:
@@ -361,7 +390,6 @@ class TaskGoal(models.Model):
 
 class Evaluation(models.Model):
     evaluation_id = models.AutoField(primary_key=True)
-    date = models.DateField(blank=True, null=True)
     overall_score = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -382,9 +410,18 @@ class Evaluation(models.Model):
         blank=True,
         null=True,
     )
+    # One evaluation per employee per year; frozen (is_final) once the year ends.
+    evaluation_year = models.PositiveSmallIntegerField(blank=True, null=True)
+    is_final = models.BooleanField(default=False)
 
     class Meta:
         db_table = 'evaluation'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee', 'evaluation_year'],
+                name='one_evaluation_per_employee_per_year',
+            ),
+        ]
 
 
 class PredictionFactor(models.Model):

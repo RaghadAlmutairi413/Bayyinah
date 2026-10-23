@@ -27,15 +27,6 @@ from .permissions import IsHRProfessional
 logger = logging.getLogger(__name__)
 
 
-def _name_parts(full_name):
-    parts = full_name.strip().split(maxsplit=1)
-    if not parts:
-        raise serializers.ValidationError('Enter a first name.')
-    if any(len(part) > 255 for part in parts):
-        raise serializers.ValidationError('Names must be 255 characters or fewer.')
-    return parts[0], parts[1] if len(parts) > 1 else ''
-
-
 def _send_invitation_email(user):
     uid = urlsafe_base64_encode(str(user.pk).encode())
     token = default_token_generator.make_token(user)
@@ -46,7 +37,7 @@ def _send_invitation_email(user):
     send_mail(
         subject='Welcome to Bayyinah - Complete Your Onboarding',
         message=(
-            f'Hello {user.full_display_name},\n\n'
+            f'Hello {user.display_name},\n\n'
             'Your Bayyinah account is ready. Use this link to set your password '
             'and finish setting up your account:\n\n'
             f'{link}\n\n'
@@ -68,7 +59,7 @@ def _send_password_reset_email(user):
     send_mail(
         subject='Password reset requested - Bayyinah',
         message=(
-            f'Hello {user.full_display_name},\n\n'
+            f'Hello {user.display_name},\n\n'
             'We received a request to reset your Bayyinah account password.\n\n'
             'Here is the link to reset your password:\n'
             f'{link}\n\n'
@@ -85,7 +76,8 @@ def _send_password_reset_email(user):
 
 def _create_account(
     email,
-    full_name,
+    first_name,
+    last_name,
     password,
     role,
     organization,
@@ -95,11 +87,9 @@ def _create_account(
     hire_date=None,
     allowed_absence_days=None,
 ):
-    first_name, last_name = _name_parts(full_name)
     user = User.objects.create_user(
         email=email,
         password=password,
-        full_name=full_name.strip(),
         first_name=first_name,
         last_name=last_name,
         org=organization,
@@ -138,7 +128,6 @@ def _employee_data(user):
         'email': user.email,
         'first_name': user.first_name or '',
         'last_name': user.last_name or '',
-        'full_name': user.full_display_name,
         'role': user.role,
         'job_title': user.job_title,
         'hire_date': user.employee_record.hire_date,
@@ -161,8 +150,8 @@ def _normalize_csv_header(header):
         'lastname': 'last_name',
         'family_name': 'last_name',
         'surname': 'last_name',
-        'name': 'full_name',
-        'employee_name': 'full_name',
+        'first': 'first_name',
+        'last': 'last_name',
         'role': 'system_role',
         'role_name': 'system_role',
         'department_name': 'department',
@@ -177,7 +166,8 @@ def _normalize_csv_header(header):
 
 class OrganizationSetupSerializer(serializers.Serializer):
     organization_name = serializers.CharField(max_length=255)
-    full_name = serializers.CharField(max_length=255)
+    first_name = serializers.CharField(max_length=255)
+    last_name = serializers.CharField(max_length=255)
     email = serializers.EmailField(max_length=255)
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
@@ -187,9 +177,17 @@ class OrganizationSetupSerializer(serializers.Serializer):
             raise serializers.ValidationError('Organization name cannot be blank.')
         return value
 
-    def validate_full_name(self, value):
-        _name_parts(value)
-        return value.strip()
+    def validate_first_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Enter a first name.')
+        return value
+
+    def validate_last_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError('Enter a last name.')
+        return value
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
@@ -216,7 +214,8 @@ class OrganizationSetupView(APIView):
                 )
                 user, _ = _create_account(
                     email=data['email'],
-                    full_name=data['full_name'],
+                    first_name=data['first_name'],
+                    last_name=data['last_name'],
                     password=data['password'],
                     role='HR',
                     organization=organization,
@@ -244,7 +243,8 @@ def _login_response(user, response_status=status.HTTP_200_OK):
             'user': {
                 'id': user.pk,
                 'email': user.email,
-                'full_name': user.full_display_name,
+                'first_name': user.first_name or '',
+                'last_name': user.last_name or '',
                 'role': user.get_role_display(),
             },
         },
@@ -383,7 +383,6 @@ class CSVEmployeeImportView(APIView):
             )
         supported = {
             'email',
-            'full_name',
             'first_name',
             'last_name',
             'system_role',
@@ -401,16 +400,14 @@ class CSVEmployeeImportView(APIView):
         if (
             'email' not in headers
             or 'system_role' not in headers
-            or not (
-                'full_name' in headers
-                or 'first_name' in headers
-            )
+            or 'first_name' not in headers
+            or 'last_name' not in headers
         ):
             return Response(
                 {
                     'file': (
-                        'CSV needs email, system role, and either full name '
-                        'or first name columns.'
+                        'CSV needs email, first name, last name, and system role '
+                        'columns.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -435,14 +432,26 @@ class CSVEmployeeImportView(APIView):
                 email = serializers.EmailField(max_length=255).run_validation(
                     row.get('email', ''),
                 )
-                full_name = row.get('full_name') or (
-                    f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
-                )
-                first_name, last_name = _name_parts(full_name)
-                role = row.get('system_role', '').strip().title()
-                if role not in {'Employee', 'Manager'}:
+                first_name = serializers.CharField(max_length=255).run_validation(
+                    row.get('first_name', ''),
+                ).strip()
+                last_name = serializers.CharField(max_length=255).run_validation(
+                    row.get('last_name', ''),
+                ).strip()
+                if not first_name:
+                    raise serializers.ValidationError('Enter a first name.')
+                if not last_name:
+                    raise serializers.ValidationError('Enter a last name.')
+                role_value = row.get('system_role', '').strip().casefold()
+                role = {
+                    'employee': 'Employee',
+                    'manager': 'Manager',
+                    'hr': 'HR',
+                    'hr professional': 'HR',
+                }.get(role_value)
+                if role is None:
                     raise serializers.ValidationError(
-                        'System role must be Employee or Manager.'
+                        'System role must be Employee, Manager, or HR.'
                     )
                 if email.casefold() in seen_emails:
                     raise serializers.ValidationError(
@@ -467,7 +476,6 @@ class CSVEmployeeImportView(APIView):
                 rows.append({
                     'row': row_number,
                     'email': email,
-                    'full_name': full_name,
                     'first_name': first_name,
                     'last_name': last_name,
                     'role': role,
@@ -486,7 +494,8 @@ class CSVEmployeeImportView(APIView):
                 with transaction.atomic():
                     user, _ = _create_account(
                         email=row['email'],
-                        full_name=row['full_name'],
+                        first_name=row['first_name'],
+                        last_name=row['last_name'],
                         password=None,
                         role=row['role'],
                         organization=request.user.org,
@@ -500,11 +509,19 @@ class CSVEmployeeImportView(APIView):
                 department_name = row['department'] or 'Unassigned'
                 summary = departments.setdefault(
                     department_name,
-                    {'name': department_name, 'employees': 0, 'managers': 0},
+                    {
+                        'name': department_name,
+                        'employees': 0,
+                        'managers': 0,
+                        'hr': 0,
+                    },
                 )
-                summary[
-                    'managers' if row['role'] == 'Manager' else 'employees'
-                ] += 1
+                role_summary_key = {
+                    'Employee': 'employees',
+                    'Manager': 'managers',
+                    'HR': 'hr',
+                }[row['role']]
+                summary[role_summary_key] += 1
             except IntegrityError:
                 errors.append({
                     'row': row['row'],
@@ -513,6 +530,7 @@ class CSVEmployeeImportView(APIView):
 
         employees_added = sum(item['employees'] for item in departments.values())
         managers_added = sum(item['managers'] for item in departments.values())
+        hr_added = sum(item['hr'] for item in departments.values())
         return Response(
             {
                 'pending_invitation_ids': created_ids,
@@ -523,6 +541,7 @@ class CSVEmployeeImportView(APIView):
                 'summary': {
                     'employees_added': employees_added,
                     'managers_added': managers_added,
+                    'hr_added': hr_added,
                     'total_added': len(created_ids),
                     'departments': list(departments.values()),
                 },
@@ -554,7 +573,7 @@ class CSVImportInviteAllView(APIView):
             user = User.objects.filter(
                 user_id=employee_id,
                 org_id=request.user.org_id,
-                employee_record__system_role__in=['Employee', 'Manager'],
+                employee_record__system_role__in=['Employee', 'Manager', 'HR'],
             ).first()
             if user is None or user.has_usable_password():
                 errors.append({
@@ -601,10 +620,16 @@ class TeamInviteView(APIView):
         name_serializer = serializers.CharField(max_length=255)
         try:
             email = email_serializer.run_validation(request.data.get('email', ''))
-            full_name = name_serializer.run_validation(
-                str(request.data.get('full_name', '')).strip(),
+            first_name = name_serializer.run_validation(
+                str(request.data.get('first_name', '')).strip(),
             )
-            first_name, _ = _name_parts(full_name)
+            last_name = name_serializer.run_validation(
+                str(request.data.get('last_name', '')).strip(),
+            )
+            if not first_name:
+                raise serializers.ValidationError('Enter a first name.')
+            if not last_name:
+                raise serializers.ValidationError('Enter a last name.')
         except serializers.ValidationError as error:
             return Response(
                 {'detail': error.detail},
@@ -633,7 +658,8 @@ class TeamInviteView(APIView):
             with transaction.atomic():
                 user, _ = _create_account(
                     email=email,
-                    full_name=full_name,
+                    first_name=first_name,
+                    last_name=last_name,
                     password=None,
                     role=role,
                     organization=request.user.org,
@@ -757,8 +783,6 @@ class EmployeeDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         for field, value in serializer.validated_data.items():
             setattr(user, field, value)
-        if 'first_name' in serializer.validated_data or 'last_name' in serializer.validated_data:
-            user.full_name = f'{user.first_name or ""} {user.last_name or ""}'.strip()
         user.save()
         return Response(_employee_data(user))
 

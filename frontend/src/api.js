@@ -2,6 +2,10 @@ const ACCESS_KEY = 'bayyinahAccessToken';
 const REFRESH_KEY = 'bayyinahRefreshToken';
 const USER_KEY = 'bayyinahUser';
 
+export function displayName(person) {
+  return `${person?.first_name || ''} ${person?.last_name || ''}`.trim();
+}
+
 export function saveLogin(login) {
   sessionStorage.setItem(ACCESS_KEY, login.access);
   sessionStorage.setItem(REFRESH_KEY, login.refresh);
@@ -11,9 +15,17 @@ export function saveLogin(login) {
 export function getLogin() {
   const access = sessionStorage.getItem(ACCESS_KEY);
   const user = sessionStorage.getItem(USER_KEY);
-  return access && user
-    ? { access, user: JSON.parse(user) }
-    : null;
+  if (!access || !user) return null;
+
+  const parsedUser = JSON.parse(user);
+  if (
+    typeof parsedUser.first_name !== 'string'
+    || typeof parsedUser.last_name !== 'string'
+  ) {
+    clearLogin();
+    return null;
+  }
+  return { access, user: parsedUser };
 }
 
 export function clearLogin() {

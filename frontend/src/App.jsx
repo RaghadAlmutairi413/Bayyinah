@@ -70,7 +70,7 @@ export default function App() {
         <span>Bayyinah <span className="brand-arabic">بينة</span></span>
       </a>
       <section className="auth-card password-card" aria-labelledby="page-title">
-        <span className="auth-kicker">EMPLOYEE ACCOUNT</span>
+        <span className="auth-kicker">ACCOUNT SETUP</span>
         {complete ? (
           <>
             <h1 id="page-title">You’re all set</h1>

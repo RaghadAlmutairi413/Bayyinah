@@ -39,6 +39,7 @@ from .views import (
     PasswordResetRequestView,
     OrganizationSetupSerializer,
     SetPasswordView,
+    TeamInviteView,
     _change_password,
     _employees_visible_to,
     _send_invitation_email,
@@ -91,6 +92,50 @@ class SchemaTests(SimpleTestCase):
             BurnoutPrediction,
         )
         self.assertEqual({model._meta.db_table for model in models}, expected)
+
+    def test_user_stores_first_and_last_names_only(self):
+        field_names = {field.name for field in User._meta.fields}
+        self.assertIn('first_name', field_names)
+        self.assertIn('last_name', field_names)
+        self.assertNotIn('full_name', field_names)
+
+    def test_user_display_name_uses_first_and_last_name(self):
+        user = User(first_name='Raghad', last_name='Almutairi')
+        self.assertEqual(user.display_name, 'Raghad Almutairi')
+
+    def test_organization_setup_requires_separate_names(self):
+        serializer = OrganizationSetupSerializer(
+            data={
+                'organization_name': 'Example Org',
+                'first_name': 'Raghad',
+                'last_name': 'Almutairi',
+                'email': 'raghad@example.com',
+                'password': 'ValidPassword123!',
+            },
+        )
+        with (
+            patch('accounts.views.User.objects.filter') as filter_users,
+            patch('accounts.views.validate_password'),
+        ):
+            filter_users.return_value.exists.return_value = False
+            self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['first_name'], 'Raghad')
+        self.assertEqual(serializer.validated_data['last_name'], 'Almutairi')
+
+    def test_organization_setup_rejects_combined_name_field(self):
+        serializer = OrganizationSetupSerializer(
+            data={
+                'organization_name': 'Example Org',
+                'full_name': 'Raghad Almutairi',
+                'email': 'raghad@example.com',
+                'password': 'ValidPassword123!',
+            },
+        )
+        with patch('accounts.views.User.objects.filter') as filter_users:
+            filter_users.return_value.exists.return_value = False
+            self.assertFalse(serializer.is_valid())
+        self.assertIn('first_name', serializer.errors)
+        self.assertIn('last_name', serializer.errors)
 
     def test_burnout_survey_has_no_prediction_factor_relationship(self):
         field_names = {field.name for field in BurnoutSurvey._meta.get_fields()}
@@ -247,7 +292,7 @@ class AccountApiTests(SimpleTestCase):
         user = SimpleNamespace(
             pk=5,
             email='person@example.com',
-            full_display_name='Person One',
+            display_name='Person One',
         )
         with (
             patch('accounts.views.settings.BAYYINAH_FRONTEND_URL', 'http://localhost:5173'),
@@ -269,7 +314,7 @@ class AccountApiTests(SimpleTestCase):
         user = SimpleNamespace(
             pk=5,
             email='person@example.com',
-            full_display_name='Person One',
+            display_name='Person One',
         )
         with (
             patch('accounts.views.settings.BAYYINAH_FRONTEND_URL', 'http://localhost:5173'),
@@ -337,7 +382,7 @@ class AccountApiTests(SimpleTestCase):
     def test_csv_import_adds_account_ids_for_separate_invite_step(self):
         upload = SimpleUploadedFile(
             'employees.csv',
-            b'email,full_name,system_role,department\nperson@example.com,Person One,Employee,People\n',
+            b'email,first_name,last_name,system_role,department\nperson@example.com,Person,One,Employee,People\n',
             content_type='text/csv',
         )
         request = self.factory.post(
@@ -349,7 +394,7 @@ class AccountApiTests(SimpleTestCase):
         created_user = SimpleNamespace(pk=33)
         with (
             patch('accounts.views.User.objects.filter') as filter_users,
-            patch('accounts.views._create_account', return_value=(created_user, MagicMock())),
+            patch('accounts.views._create_account', return_value=(created_user, MagicMock())) as create_account,
             patch('accounts.views.transaction.atomic', return_value=nullcontext()),
         ):
             filter_users.return_value.exists.return_value = False
@@ -359,6 +404,92 @@ class AccountApiTests(SimpleTestCase):
         self.assertEqual(response.data['pending_invitation_ids'], [33])
         self.assertEqual(response.data['summary']['employees_added'], 1)
         self.assertEqual(response.data['summary']['departments'][0]['name'], 'People')
+        self.assertEqual(create_account.call_args.kwargs['first_name'], 'Person')
+        self.assertEqual(create_account.call_args.kwargs['last_name'], 'One')
+
+    def test_csv_import_accepts_and_counts_hr_rows(self):
+        upload = SimpleUploadedFile(
+            'hr.csv',
+            (
+                b'email,first_name,last_name,system_role,department\n'
+                b'hr@example.com,Human,Resources,HR,People\n'
+                b'hr2@example.com,Another,Professional,hr professional,People\n'
+            ),
+            content_type='text/csv',
+        )
+        request = self.factory.post(
+            '/api/accounts/import-csv/',
+            {'file': upload},
+            format='multipart',
+        )
+        force_authenticate(request, user=self.hr_user())
+        users = [SimpleNamespace(pk=41), SimpleNamespace(pk=42)]
+        with (
+            patch('accounts.views.User.objects.filter') as filter_users,
+            patch(
+                'accounts.views._create_account',
+                side_effect=[(user, MagicMock()) for user in users],
+            ) as create_account,
+            patch('accounts.views.transaction.atomic', return_value=nullcontext()),
+        ):
+            filter_users.return_value.exists.return_value = False
+            response = CSVEmployeeImportView.as_view()(request)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['pending_invitation_ids'], [41, 42])
+        self.assertEqual(response.data['summary']['hr_added'], 2)
+        self.assertEqual(response.data['summary']['employees_added'], 0)
+        self.assertEqual(response.data['summary']['managers_added'], 0)
+        self.assertEqual(create_account.call_args_list[0].kwargs['role'], 'HR')
+        self.assertEqual(create_account.call_args_list[1].kwargs['role'], 'HR')
+        self.assertEqual(response.data['errors'], [])
+
+    def test_csv_import_rejects_combined_name_column(self):
+        upload = SimpleUploadedFile(
+            'employees.csv',
+            b'email,full_name,system_role\nperson@example.com,Person One,Employee\n',
+            content_type='text/csv',
+        )
+        request = self.factory.post(
+            '/api/accounts/import-csv/',
+            {'file': upload},
+            format='multipart',
+        )
+        force_authenticate(request, user=self.hr_user())
+
+        response = CSVEmployeeImportView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('unsupported columns', response.data['file'])
+
+    def test_team_invite_uses_separate_name_fields(self):
+        request = self.factory.post(
+            '/api/accounts/team-invite/',
+            {
+                'email': 'person@example.com',
+                'first_name': 'Person',
+                'last_name': 'One',
+                'role': 'Employee',
+            },
+            format='json',
+        )
+        force_authenticate(request, user=self.hr_user())
+        user = SimpleNamespace(email='person@example.com')
+        with (
+            patch('accounts.views.User.objects.filter') as filter_users,
+            patch(
+                'accounts.views._create_account',
+                return_value=(user, MagicMock()),
+            ) as create_account,
+            patch('accounts.views.transaction.atomic', return_value=nullcontext()),
+            patch('accounts.views._send_invitation_email'),
+        ):
+            filter_users.return_value.exists.return_value = False
+            response = TeamInviteView.as_view()(request)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(create_account.call_args.kwargs['first_name'], 'Person')
+        self.assertEqual(create_account.call_args.kwargs['last_name'], 'One')
 
     def test_invite_all_uses_ids_without_a_batch_table(self):
         request = self.factory.post(
@@ -381,4 +512,9 @@ class AccountApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['invited'], 1)
         self.assertEqual(response.data['remaining_ids'], [])
+        filter_users.assert_called_once_with(
+            user_id=33,
+            org_id=12,
+            employee_record__system_role__in=['Employee', 'Manager', 'HR'],
+        )
         send_email.assert_called_once_with(user)

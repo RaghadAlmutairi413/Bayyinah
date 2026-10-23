@@ -1,5 +1,19 @@
 import { useEffect, useState } from 'react';
-import { apiRequest, clearLogin, getLogin, responseData } from './api.js';
+import { apiRequest, clearLogin, displayName, getLogin, responseData } from './api.js';
+
+import Shell, { Banner } from './Shell.jsx';
+import {
+  EmptyState,
+  ProgressBar,
+  Stats,
+  StatusBadge,
+  TableSkeleton,
+  formatDate,
+  getJson,
+  isOverdue,
+  sortTasks,
+  useBanner,
+} from './taskUi.jsx';
 
 const BATCH_KEY = 'bayyinahCsvImportV2';
 
@@ -34,6 +48,7 @@ export default function Dashboard({ role }) {
       window.location.replace('/login');
       return;
     }
+
 
     const actualRole = savedLogin.user.role === 'HR Professional' ? 'HR' : savedLogin.user.role;
     if (actualRole !== role) {
@@ -137,28 +152,12 @@ export default function Dashboard({ role }) {
   const departmentNames = [...new Set(employees.map((employee) => employee.department.name))];
   const managerCount = employees.filter((employee) => employee.role === 'Manager').length;
   const employeeCount = employees.filter((employee) => employee.role === 'Employee').length;
+  const hrCount = employees.filter((employee) => employee.role === 'HR').length;
   const invitationsPending = batch?.invitations?.remaining ?? batch?.summary?.total_added ?? 0;
 
   return (
-    <main className="dashboard">
-      <header className="dashboard-header">
-        <div className="dashboard-heading">
-          <a className="dashboard-brand" href="/" aria-label="Bayyinah home">
-            <img className="dashboard-logo" src="/bayyinah-logo.png" alt="" />
-            <span>Bayyinah</span>
-          </a>
-          <div>
-            <p className="eyebrow">BAYYINAH WORKSPACE</p>
-            <h1>{role === 'HR' ? 'HR Dashboard' : `${role} Dashboard`}</h1>
-            <p className="description">Welcome back, {login.user.full_name}</p>
-          </div>
-        </div>
-        <div className="dashboard-header-actions">
-          <span className="user-chip"><span className="user-avatar">{initials(login.user.full_name)}</span>{login.user.role}</span>
-          <button className="secondary-button" type="button" onClick={logout}>Log out</button>
-        </div>
-      </header>
-
+    <Shell role={role} title={role === 'HR' ? 'HR Dashboard' : `${role} Dashboard`} subtitle={`Welcome back, ${displayName(login.user)}`}>
+      <div className="dashboard dashboard-in-shell">
       {message && (
         <div className={`status-banner${isError ? ' error' : ''}`} role="status">
           <span aria-hidden="true">{isError ? '!' : '✓'}</span>
@@ -166,24 +165,7 @@ export default function Dashboard({ role }) {
         </div>
       )}
 
-      <div className={role === 'HR' ? 'dashboard-workspace hr-dashboard-workspace' : 'dashboard-workspace'}>
-        {role === 'HR' ? (
-          <nav className="hr-dashboard-sidebar" aria-label="HR dashboard navigation">
-            <a className="active" href={dashboardPath(role)}>Overview</a>
-            <a href="#overview">Dashboards</a>
-            <a href="#team">People</a>
-            <a href="#import">Import team</a>
-            <a href="/" onClick={(event) => { event.preventDefault(); logout(); }}>Sign out</a>
-          </nav>
-        ) : (
-          <nav className="dashboard-subnav" aria-label="Workspace navigation">
-            <a className="active" href={dashboardPath(role)}>Overview</a>
-            {role === 'Manager' && <a href="#team">My department</a>}
-            {role === 'Employee' && <a href="#team">My profile</a>}
-            <a href="/" onClick={(event) => { event.preventDefault(); logout(); }}>Sign out</a>
-          </nav>
-        )}
-
+      <div className="dashboard-workspace">
         <div className="dashboard-content">
         <div className="dashboard-main">
           {role === 'HR' && (
@@ -226,12 +208,13 @@ export default function Dashboard({ role }) {
                     <div className="summary-grid">
                       <div><strong>{batch.summary.employees_added}</strong><span>Employees added</span></div>
                       <div><strong>{batch.summary.managers_added}</strong><span>Managers added</span></div>
+                      <div><strong>{batch.summary.hr_added || 0}</strong><span>HR added</span></div>
                       <div><strong>{batch.summary.departments.length}</strong><span>Departments</span></div>
                     </div>
                     <div className="table-wrap">
                       <table>
                         <thead>
-                          <tr><th>Department</th><th>Employees</th><th>Managers</th></tr>
+                          <tr><th>Department</th><th>Employees</th><th>Managers</th><th>HR</th></tr>
                         </thead>
                         <tbody>
                           {batch.summary.departments.map((department) => (
@@ -239,6 +222,7 @@ export default function Dashboard({ role }) {
                               <td>{department.name}</td>
                               <td>{department.employees}</td>
                               <td>{department.managers}</td>
+                              <td>{department.hr || 0}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -311,6 +295,7 @@ export default function Dashboard({ role }) {
               <>
                 <div className="aside-stat"><span>Employees</span><strong>{employeeCount}</strong></div>
                 <div className="aside-stat"><span>Managers</span><strong>{managerCount}</strong></div>
+                <div className="aside-stat"><span>HR</span><strong>{hrCount}</strong></div>
                 <div className="aside-stat"><span>Departments</span><strong>{departmentNames.length}</strong></div>
                 <div className="aside-stat"><span>Awaiting invite</span><strong>{invitationsPending}</strong></div>
               </>
@@ -336,7 +321,8 @@ export default function Dashboard({ role }) {
         </aside>
       </div>
       </div>
-    </main>
+      </div>
+    </Shell>
   );
 }
 
@@ -354,7 +340,7 @@ function EmployeeTable({ employees }) {
         <tbody>
           {employees.map((employee) => (
             <tr key={employee.id}>
-              <td>{employee.full_name}</td>
+              <td>{displayName(employee)}</td>
               <td>{employee.email}</td>
               <td><span className={`table-role${employee.role === 'Manager' ? ' manager' : ''}`}>{employee.role}</span></td>
               <td>{employee.department.name}</td>
@@ -364,4 +350,172 @@ function EmployeeTable({ employees }) {
       </table>
     </div>
   );
+}
+
+
+// ---------- Manager and employee overview ----------
+
+const ACTIONABLE = ['todo', 'in_progress', 'changes_requested'];
+
+// A short list of tasks. Each row links to the page where the task can be opened.
+function TaskList({ tasks, href, empty }) {
+  if (tasks.length === 0) return <p className="ws-hint ws-list-empty">{empty}</p>;
+  return (
+    <ul className="ws-mini-list">
+      {tasks.map((task) => (
+        <li key={task.id}>
+          <a className="ws-plain-link" href={href(task)}>
+            <span className="ws-mini-title">{task.title}</span>
+            <span className="ws-mini-meta">{displayName(task.assignee)} · {isOverdue(task) ? 'overdue since ' : 'due '}{formatDate(task.due_date)}</span>
+          </a>
+          <StatusBadge status={task.status} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PeopleTable({ people }) {
+  if (people.length === 0) {
+    return <EmptyState icon="users" title="No employee records are available for this account yet" />;
+  }
+  return (
+    <div className="ws-table-card">
+      <table className="ws-table">
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Department</th></tr></thead>
+        <tbody>
+          {people.map((person) => (
+            <tr key={person.id}>
+              <td className="ws-task-title">{displayName(person)}</td>
+              <td>{person.email}</td>
+              <td>{person.role}</td>
+              <td>{person.department.name}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function OverviewContent({ role }) {
+  const isManager = role === 'Manager';
+  const { banner, failure, clear } = useBanner();
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [tasks, projects, people] = await Promise.all([
+          getJson('/api/workspace/tasks/'),
+          getJson('/api/workspace/projects/'),
+          getJson('/api/accounts/employees/'),
+        ]);
+        setData({ tasks, projects, people });
+      } catch (error) {
+        failure(error);
+        setData({ tasks: [], projects: [], people: [] });
+      }
+    }
+    load();
+  }, []);
+
+  if (!data) return <TableSkeleton rows={4} />;
+
+  const { tasks, projects, people } = data;
+
+  if (isManager) {
+    const open = tasks.filter((task) => task.status !== 'completed');
+    const review = sortTasks(tasks.filter((task) => task.status === 'in_review'), 'due');
+    const overdue = sortTasks(tasks.filter((task) => isOverdue(task)), 'due');
+    const taskHref = (task) => `/manager/tasks?task=${task.id}`;
+    return (
+      <>
+        <Banner message={banner.message} isError={banner.isError} onClose={clear} />
+        <Stats items={[
+          { label: 'Projects', value: projects.length },
+          { label: 'Open tasks', value: open.length },
+          { label: 'Awaiting review', value: review.length, tone: review.length ? 'warn' : '' },
+          { label: 'Overdue', value: overdue.length, tone: overdue.length ? 'danger' : '' },
+        ]}
+        />
+        <div className="ws-two-col">
+          <section className="ws-card ws-side-card">
+            <div className="ws-card-head"><h3>Awaiting your review</h3><a className="ws-link" href="/manager/tasks">All tasks</a></div>
+            <TaskList tasks={review.slice(0, 5)} href={taskHref} empty="Nothing is waiting for your review." />
+          </section>
+          <section className="ws-card ws-side-card">
+            <div className="ws-card-head"><h3>Overdue</h3><a className="ws-link" href="/manager/tasks">All tasks</a></div>
+            <TaskList tasks={overdue.slice(0, 5)} href={taskHref} empty="No overdue tasks." />
+          </section>
+        </div>
+        <section className="ws-card ws-side-card">
+          <div className="ws-card-head"><h3>Your projects</h3><a className="ws-link" href="/manager/projects">All projects</a></div>
+          {projects.length === 0 ? (
+            <p className="ws-hint ws-list-empty">You have not created any projects yet.</p>
+          ) : (
+            <ul className="ws-member-list">
+              {projects.slice(0, 5).map((project) => (
+                <li key={project.id} className="ws-member-row">
+                  <a className="ws-plain-link ws-task-title" href={`/manager/project?id=${project.id}`}>{project.name}</a>
+                  <ProgressBar progress={project.progress} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        <section className="ws-card ws-side-card">
+          <div className="ws-card-head"><h3>Your department team</h3></div>
+          <PeopleTable people={people} />
+        </section>
+      </>
+    );
+  }
+
+
+  const mine = tasks.filter((task) => task.is_mine);
+  const actionable = mine.filter((task) => ACTIONABLE.includes(task.status));
+  const changes = mine.filter((task) => task.status === 'changes_requested');
+  const overdue = actionable.filter((task) => isOverdue(task));
+  const attention = sortTasks(
+    actionable.filter((task) => task.status === 'changes_requested' || isOverdue(task)),
+    'due',
+  );
+  return (
+    <>
+      <Banner message={banner.message} isError={banner.isError} onClose={clear} />
+      <Stats items={[
+        { label: 'Open tasks', value: actionable.length },
+        { label: 'Changes requested', value: changes.length, tone: changes.length ? 'danger' : '' },
+        { label: 'Overdue', value: overdue.length, tone: overdue.length ? 'danger' : '' },
+        { label: 'Submitted', value: mine.filter((task) => task.status === 'in_review').length },
+        { label: 'Completed', value: mine.filter((task) => task.status === 'completed').length },
+      ]}
+      />
+      <section className="ws-card ws-side-card">
+        <div className="ws-card-head"><h3>Needs your attention</h3><a className="ws-link" href="/employee/tasks">My tasks</a></div>
+        <TaskList tasks={attention.slice(0, 6)} href={(task) => `/employee/tasks?task=${task.id}`} empty="You are all caught up." />
+      </section>
+      <section className="ws-card ws-side-card">
+        <div className="ws-card-head"><h3>Your employee profile</h3></div>
+        <PeopleTable people={people} />
+      </section>
+    </>
+  );
+}
+
+function WorkspaceOverview({ role }) {
+  return (
+    <Shell role={role} title="Overview">
+      <OverviewContent role={role} />
+    </Shell>
+  );
+}
+
+export function DashboardRouter({ role }) {
+  if (role === 'HR' || role === 'HR Professional') {
+    return <Dashboard role="HR" />;
+  }
+
+  return <WorkspaceOverview role={role} />;
 }

@@ -4,7 +4,8 @@ import { responseData, saveLogin } from './api.js';
 export default function OrgSetup() {
   const [form, setForm] = useState({
     organization_name: '',
-    full_name: '',
+    first_name: '',
+    last_name: '',
     email: '',
     password: '',
     confirm_password: '',
@@ -31,7 +32,8 @@ export default function OrgSetup() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           organization_name: form.organization_name,
-          full_name: form.full_name,
+          first_name: form.first_name,
+          last_name: form.last_name,
           email: form.email,
           password: form.password,
         }),
@@ -60,8 +62,16 @@ export default function OrgSetup() {
         <form onSubmit={submit}>
           <label htmlFor="organization-name">Organization name</label>
           <input id="organization-name" type="text" maxLength="255" autoComplete="organization" value={form.organization_name} onChange={(event) => update('organization_name', event.target.value)} required />
-          <label htmlFor="admin-name">Your full name</label>
-          <input id="admin-name" type="text" autoComplete="name" value={form.full_name} onChange={(event) => update('full_name', event.target.value)} required />
+          <div className="form-two-columns">
+            <div>
+              <label htmlFor="admin-first-name">First name</label>
+              <input id="admin-first-name" type="text" maxLength="255" autoComplete="given-name" value={form.first_name} onChange={(event) => update('first_name', event.target.value)} required />
+            </div>
+            <div>
+              <label htmlFor="admin-last-name">Last name</label>
+              <input id="admin-last-name" type="text" maxLength="255" autoComplete="family-name" value={form.last_name} onChange={(event) => update('last_name', event.target.value)} required />
+            </div>
+          </div>
           <label htmlFor="admin-email">Work email</label>
           <input id="admin-email" type="email" autoComplete="email" value={form.email} onChange={(event) => update('email', event.target.value)} required />
           <div className="form-two-columns">
